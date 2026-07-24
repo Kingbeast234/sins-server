@@ -1,0 +1,12 @@
+{
+  "name": "sins-paradox-server",
+  "version": "1.0.0",
+  "description": "SINS-PARADOX multiplayer WebSocket lobby/relay server",
+  "main": "sins-server.js",
+  "scripts": {
+    "start": "node sins-server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
