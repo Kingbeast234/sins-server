@@ -14,6 +14,7 @@ const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3000;
 const rooms = new Map(); // code -> { players: Map(id, {name, isHost, ready}), hostId, maxPlayers, state }
+let quickMatchOpenRoom = null; // code of the quick-match room currently accepting new players, if any
 
 function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -180,6 +181,7 @@ server.on('upgrade', (req, socket) => {
         room.players.delete(playerId);
         if (room.players.size === 0) {
           rooms.delete(currentRoom);
+          if (quickMatchOpenRoom === currentRoom) quickMatchOpenRoom = null;
         } else {
           // if host left, assign new host
           const stillThere = [...room.players.values()];
@@ -194,6 +196,65 @@ server.on('upgrade', (req, socket) => {
 
   function handleMessage(msg) {
     switch (msg.type) {
+      case 'quick_match': {
+        let room = null;
+        if (quickMatchOpenRoom) {
+          const candidate = rooms.get(quickMatchOpenRoom);
+          if (candidate && !candidate.started && candidate.players.size < candidate.maxPlayers) {
+            room = candidate;
+          } else {
+            quickMatchOpenRoom = null;
+          }
+        }
+
+        if (room) {
+          // Join the already-open quick-match room
+          room.players.set(playerId, {
+            id: playerId,
+            name: msg.name || 'PLAYER',
+            isHost: false,
+            ready: false,
+            ws: socket,
+            isBot: false
+          });
+          currentRoom = room.code;
+          send({ type: 'joined', you: playerId, room: roomPublicState(room) });
+          broadcast(room, { type: 'room_update', room: roomPublicState(room) }, playerId);
+          if (room.players.size >= room.maxPlayers) {
+            if (quickMatchOpenRoom === room.code) quickMatchOpenRoom = null;
+            if (room.quickMatchTimer) { clearTimeout(room.quickMatchTimer); room.quickMatchTimer = null; }
+            room.started = true;
+            broadcast(room, { type: 'game_start', room: roomPublicState(room) });
+          }
+        } else {
+          // Open a new quick-match room and wait briefly for others to join it
+          let code;
+          do { code = generateCode(); } while (rooms.has(code));
+          room = { code, players: new Map(), maxPlayers: 3, started: false, isQuickMatch: true };
+          room.players.set(playerId, {
+            id: playerId,
+            name: msg.name || 'PLAYER',
+            isHost: true,
+            ready: false,
+            ws: socket,
+            isBot: false
+          });
+          rooms.set(code, room);
+          quickMatchOpenRoom = code;
+          currentRoom = code;
+          send({ type: 'joined', you: playerId, room: roomPublicState(room) });
+          // Auto-start after a short search window even if nobody else joins —
+          // the client fills any empty seats with bots, same as a manual Start.
+          room.quickMatchTimer = setTimeout(() => {
+            const stillHere = rooms.get(code);
+            if (!stillHere || stillHere.started) return;
+            if (quickMatchOpenRoom === code) quickMatchOpenRoom = null;
+            stillHere.started = true;
+            broadcast(stillHere, { type: 'game_start', room: roomPublicState(stillHere) });
+          }, 9000);
+        }
+        break;
+      }
       case 'create': {
         let code;
         do { code = generateCode(); } while (rooms.has(code));
@@ -269,10 +330,12 @@ server.on('upgrade', (req, socket) => {
         if (!room) return;
         const me = room.players.get(playerId);
         if (!me || !me.isHost) return;
-        if (room.players.size < 2) {
+        if (room.players.size < 2 && !room.isQuickMatch) {
           send({ type: 'error', message: 'Need at least 2 players' });
           return;
         }
+        if (quickMatchOpenRoom === room.code) quickMatchOpenRoom = null;
+        if (room.quickMatchTimer) { clearTimeout(room.quickMatchTimer); room.quickMatchTimer = null; }
         room.started = true;
         broadcast(room, { type: 'game_start', room: roomPublicState(room) });
         break;
